@@ -24,7 +24,7 @@ kubectl create namespace authorino
 The _Talker API_ is just an echo API, included with the Authorino examples. We will use it to simulate Kafka Service Fleet Manager.
 
 ```sh
-kubectl -n authorino apply -f https://raw.githubusercontent.com/Kuadrant/authorino/main/examples/talker-api/talker-api-deploy.yaml
+kubectl -n authorino apply -f https://raw.githubusercontent.com/kuadrant/authorino-examples/main/talker-api/talker-api-deploy.yaml
 ```
 
 ### Deploy an Authorino instance
@@ -49,8 +49,8 @@ EOF
 The following bundle from the Authorino examples (commands below) sets up the Envoy proxy, wiring up the Talker API behind the reverse-proxy and the Authorino instance to the external authorization HTTP filter.
 
 ```sh
-curl -L https://raw.githubusercontent.com/Kuadrant/authorino/main/examples/envoy/overlays/notls/configmap.yaml | sed -E 's/authorino-authorization/authorino-authorino-authorization/g;s/ timeout: 1s/ timeout: 3s/g' | kubectl -n myapp apply -f -
-kubectl -n authorino apply -f https://raw.githubusercontent.com/Kuadrant/authorino/main/examples/envoy/base/envoy.yaml
+curl -L https://raw.githubusercontent.com/kuadrant/authorino-examples/main/envoy/overlays/notls/configmap.yaml | sed -E 's/ timeout: 1s/ timeout: 3s/g' | kubectl -n myapp apply -f -
+kubectl -n authorino apply -f https://raw.githubusercontent.com/kuadrant/authorino-examples/main/envoy/base/envoy.yaml
 ```
 
 In this demo, Kafka Service Fleet Manager (actually the Talker API), Envoy and Authorino all run within their own separate pods. In a real-life scenario, Envoy and Authorino would likely be deployed as sidecars of Kafka Service Fleet Manager instead.
