@@ -9,10 +9,9 @@ This is a PoC on protecting [Kafka Service Fleet Manager](https://api.openshift.
 kind create cluster --name kas-fleet-manager-demo
 ```
 
-### Deploy the Authorino Operator
+### Install the Authorino Operator
 ```sh
-git clone https://github.com/kuadrant/authorino-operator && cd authorino-operator
-kubectl create namespace authorino-operator && make install deploy
+kubectl apply -f https://raw.githubusercontent.com/Kuadrant/authorino-operator/main/config/deploy/manifests.yaml
 ```
 
 ### Create a namespace
@@ -20,7 +19,7 @@ kubectl create namespace authorino-operator && make install deploy
 kubectl create namespace authorino
 ```
 
-### Deploy an API that pretends to be Kafka Service Fleet Manager
+### Deploy an API that pretends to be the Kafka Service Fleet Manager service
 The _Talker API_ is just an echo API, included with the Authorino examples. We will use it to simulate Kafka Service Fleet Manager.
 
 ```sh
@@ -49,8 +48,7 @@ EOF
 The following bundle from the Authorino examples (commands below) sets up the Envoy proxy, wiring up the Talker API behind the reverse-proxy and the Authorino instance to the external authorization HTTP filter.
 
 ```sh
-curl -L https://raw.githubusercontent.com/kuadrant/authorino-examples/main/envoy/overlays/notls/configmap.yaml | sed -E 's/ timeout: 1s/ timeout: 3s/g' | kubectl -n myapp apply -f -
-kubectl -n authorino apply -f https://raw.githubusercontent.com/kuadrant/authorino-examples/main/envoy/base/envoy.yaml
+curl -L https://raw.githubusercontent.com/Kuadrant/authorino-examples/main/envoy/envoy-notls-deploy.yaml | sed -E 's/ timeout: 1s/ timeout: 3s/g' | kubectl -n authorino apply -f -
 ```
 
 In this demo, Kafka Service Fleet Manager (actually the Talker API), Envoy and Authorino all run within their own separate pods. In a real-life scenario, Envoy and Authorino would likely be deployed as sidecars of Kafka Service Fleet Manager instead.
@@ -64,7 +62,7 @@ kubectl -n authorino port-forward deployment/envoy 8000:8000 &
 ### Apply the `AuthConfig`
 ```sh
 kubectl -n authorino apply -f -<<EOF
-apiVersion: authorino.3scale.net/v1beta1
+apiVersion: authorino.kuadrant.io/v1beta1
 kind: AuthConfig
 metadata:
   name: kas-fleet-manager-protection
@@ -88,7 +86,7 @@ spec:
             authJSON: context.request.http.headers.authorization
   - name: quota-cost
     http:
-      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/organizations/{auth.metadata.ams-current-account.organization.id}/quota_cost?fetchRelatedResources=true&search=allowed%20%3E%200
+      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/organizations/{auth.metadata.ams-current-account.organization.id}/quota_cost?fetchRelatedResources=true&search=allowed%20%3E%200&forceRecalc=true
       method: GET
       headers:
         - name: Authorization
@@ -112,12 +110,14 @@ spec:
           quota.items[i].related_resources[j].resource_name == "rhosak"
           quota.items[i].related_resources[j].product == "RHOSAK"
           quota.items[i].related_resources[j].billing_model == "standard"
+          quota.items[i].allowed - quota.items[i].consumed > 0
         }
 
         quota_type_std__billing_model_marketplace {
           quota.items[i].related_resources[j].resource_name == "rhosak"
           quota.items[i].related_resources[j].product == "RHOSAK"
           quota.items[i].related_resources[j].billing_model == "marketplace"
+          quota.items[i].allowed - quota.items[i].consumed > 0
         }
 
         allow { not create_kafka_instance }
