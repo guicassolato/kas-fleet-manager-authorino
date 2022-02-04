@@ -1,4 +1,4 @@
-apiVersion: authorino.3scale.net/v1beta1
+apiVersion: authorino.kuadrant.io/v1beta1
 kind: AuthConfig
 metadata:
   name: kas-fleet-manager-protection
@@ -22,7 +22,7 @@ spec:
             authJSON: context.request.http.headers.authorization
   - name: quota-cost
     http:
-      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/organizations/{auth.metadata.ams-current-account.organization.id}/quota_cost?fetchRelatedResources=true&search=allowed%20%3E%200
+      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/organizations/{auth.metadata.ams-current-account.organization.id}/quota_cost?fetchRelatedResources=true&search=allowed%20%3E%200&forceRecalc=true
       method: GET
       headers:
         - name: Authorization
@@ -46,12 +46,14 @@ spec:
           quota.items[i].related_resources[j].resource_name == "rhosak"
           quota.items[i].related_resources[j].product == "RHOSAK"
           quota.items[i].related_resources[j].billing_model == "standard"
+          quota.items[i].allowed - quota.items[i].consumed > 0
         }
 
         quota_type_std__billing_model_marketplace {
           quota.items[i].related_resources[j].resource_name == "rhosak"
           quota.items[i].related_resources[j].product == "RHOSAK"
           quota.items[i].related_resources[j].billing_model == "marketplace"
+          quota.items[i].allowed - quota.items[i].consumed > 0
         }
 
         allow { not create_kafka_instance }
