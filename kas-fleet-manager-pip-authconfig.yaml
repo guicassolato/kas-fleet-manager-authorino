@@ -1,0 +1,34 @@
+# AuthConfig to protect the Policy Information Point (PIP) endpoints of Kafka Management API (kas-fleet-manager).
+# These are endpoints consumed inside the cluster, to obtain metadata required for the evaluation of
+# authorization policies.
+apiVersion: authorino.kuadrant.io/v1beta1
+kind: AuthConfig
+metadata:
+  name: kas-fleet-manager-pip
+  labels:
+    authorino.kuadrant.io/tenant: kas-fleet-manager
+spec:
+  hosts:
+  - kas-fleet-manager-envoy.kas-fleet-manager-authorino.svc:9001
+
+  identity:
+  - name: metadata-clients
+    apiKey:
+      selector:
+        matchLabels:
+          authorino.kuadrant.io/tenant: kas-fleet-manager
+          authorino.kuadrant.io/audience: kas-fleet-manager-pip
+    credentials:
+      in: custom_header
+      keySelector: x-api-key
+
+  authorization:
+  - name: allowed-endpoints
+    json:
+      rules:
+      - selector: context.request.http.method
+        operator: eq
+        value: GET
+      - selector: context.request.http.path
+        operator: matches
+        value: ^/api/kafkas_mgmt/v1/authz-metadata/(kafkas|agent-clusters)/[^/]+$

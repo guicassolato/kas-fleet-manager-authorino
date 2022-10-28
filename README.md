@@ -1,40 +1,133 @@
-# Kafka Fleet Manager with Authorino
+# Kafka Fleet Manager with Authorino (POC)
 
-This is a PoC on protecting [Kafka Service Fleet Manager](https://api.openshift.com/?urls.primaryName=kafka%20service%20fleet%20manager%20service) with [Authorino](https://github.com/kuadrant/authorino).
+This is a Proof of Concept (PoC) on protecting the [Kafka Management API](https://api.openshift.com/?urls.primaryName=kafka%20service%20fleet%20manager%20service) (a.k.a. Kafka Fleet Manager service) with [Authorino](https://github.com/kuadrant/authorino).
 
-## 1. Setup the environment
+## Architecture
 
-### Start the Kubernetes cluster
+![Architecture](architecture.svg)
+
+## Run the demo
+
+### Prerequisites
+
+- [KAS Installer](https://github.com/bf2fc6cc711aee1a0c2a/kas-installer) tool
+- [OpenShift](https://www.openshift.com) (tested on OpenShift v4.11.7)
+- A user with administrative privileges in the OpenShift cluster
+- Red Hat user with permissions to pull the required container images
+- Application and Data Services [Service Account](https://console.redhat.com/application-services/service-accounts)
+- Kubernetes CLI (`kubectl`)
+- [OpenShift CLI](https://docs.openshift.com/container-platform/4.11/cli_reference/openshift_cli/getting-started-cli.html) (`oc`)
+- [yq](https://mikefarah.gitbook.io/yq/) (v0.4.x)
+
+Additional prerequisites on MacOS:
+- envsubst (`brew install gettext`)
+
+### 1. Login to the cluster
+
+Export the cluster domain to a shell variable:
+
 ```sh
-kind create cluster --name kas-fleet-manager-demo
+export K8S_CLUSTER_DOMAIN=<your-openshift-cluster-domain>
 ```
 
-### Install the Authorino Operator
+Login to the target OpenShift cluster where you want to run the Kafka Fleet Manager API:
+
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/Kuadrant/authorino-operator/main/config/deploy/manifests.yaml
+oc login --token=<secret-token> --server=https://api.$K8S_CLUSTER_DOMAIN:6443
 ```
 
-### Create a namespace
+### 2. Run the Kafka Fleet Manager service
+
+Make sure to match the [prerequisites](https://github.com/bf2fc6cc711aee1a0c2a/kas-installer#prerequisites) to use KAS Installer and then execute the steps below.
+
+Download KAS Installer:
+
 ```sh
-kubectl create namespace authorino
+git clone git@github.com:bf2fc6cc711aee1a0c2a/kas-installer.git && cd kas-installer
 ```
 
-### Deploy an API that pretends to be the Kafka Service Fleet Manager service
-The _Talker API_ is just an echo API, included with the Authorino examples. We will use it to simulate Kafka Service Fleet Manager.
+Replace the placeholders below with the corresponding values and create your custom KAS installer configuration file `kas-installer.env`:
 
 ```sh
-kubectl -n authorino apply -f https://raw.githubusercontent.com/kuadrant/authorino-examples/main/talker-api/talker-api-deploy.yaml
+cat <<EOF>kas-installer.env
+K8S_CLUSTER_DOMAIN="${K8S_CLUSTER_DOMAIN}"
+
+USER=authorino
+
+RH_USERNAME="<redhat-username>"
+RH_USER_ID="<redhat-user-id>"
+RH_ORG_ID="<redhat-org-id>"
+
+OBSERVABILITY_CONFIG_REPO="https://api.github.com/repos/<github-org>/observability-resources-mk/contents"
+OBSERVABILITY_CONFIG_ACCESS_TOKEN=<github-pat-with-read-permission-on-your-fork-of-observability-resources-mk>
+
+IMAGE_REPOSITORY_USERNAME=<quay.io-username>
+IMAGE_REPOSITORY_PASSWORD=<quay.io-encrypted-password>
+
+SSO_PROVIDER_TYPE=redhat_sso
+REDHAT_SSO_HOSTNAME=sso.redhat.com
+REDHAT_SSO_CLIENT_ID=<service-account-client-id>
+REDHAT_SSO_CLIENT_SECRET=<service-account-client-secret>
+
+KAS_FLEET_MANAGER_IMAGE_REPOSITORY=guicassolato/kas-fleet-manager
+KAS_FLEET_MANAGER_IMAGE_TAG=ext-authz
+EOF
 ```
 
-### Deploy an Authorino instance
+Install Kafka Fleet Manager:
+
 ```sh
-kubectl -n authorino apply -f -<<EOF
+./kas-installer.sh
+```
+
+The step above may take several minutes.
+
+### 3. Install Authorino
+
+Install the Authorino Operator:
+
+```sh
+kubectl apply -f -<<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authorino-operator
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: kuadrant-operators
+  namespace: authorino-operator
+spec:
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: authorino-operator
+  namespace: authorino-operator
+spec:
+  channel: alpha
+  installPlanApproval: Automatic
+  name: authorino-operator
+  source: community-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: authorino-operator.v0.4.1
+EOF
+```
+
+Request an Authorino instance:
+
+```sh
+kubectl -n kas-fleet-manager-authorino apply -f -<<EOF
 apiVersion: operator.authorino.kuadrant.io/v1beta1
 kind: Authorino
 metadata:
   name: authorino
 spec:
-  logLevel: debug
+  image: quay.io/kuadrant/authorino:latest # Using 'latest' because it contains the fix to https://github.com/Kuadrant/authorino/issues/356
+  authConfigLabelSelectors: authorino.kuadrant.io/tenant=kas-fleet-manager
+  secretLabelSelectors: authorino.kuadrant.io/secret in (api-key, x509),authorino.kuadrant.io/tenant=kas-fleet-manager
   listener:
     tls:
       enabled: false
@@ -44,106 +137,127 @@ spec:
 EOF
 ```
 
-### Setup Envoy
-The following bundle from the Authorino examples (commands below) sets up the Envoy proxy, wiring up the Talker API behind the reverse-proxy and the Authorino instance to the external authorization HTTP filter.
+Get TLS certificates for the Authorino services inssued by the OpenShift certificate issuer:
 
 ```sh
-curl -L https://raw.githubusercontent.com/Kuadrant/authorino-examples/main/envoy/envoy-notls-deploy.yaml | sed -E 's/ timeout: 1s/ timeout: 3s/g' | kubectl -n authorino apply -f -
+kubectl -n kas-fleet-manager-authorino annotate service/authorino-authorino-authorization service.alpha.openshift.io/serving-cert-secret-name=authorino-authorino-authorization-tls
+kubectl -n kas-fleet-manager-authorino annotate service/authorino-authorino-oidc service.alpha.openshift.io/serving-cert-secret-name=authorino-authorino-oidc-tls
 ```
 
-In this demo, Kafka Service Fleet Manager (actually the Talker API), Envoy and Authorino all run within their own separate pods. In a real-life scenario, Envoy and Authorino would likely be deployed as sidecars of Kafka Service Fleet Manager instead.
-
-Forward requests on port 8000 to inside the cluster in order to actually reach the Envoy service:
+Enable TLS in the Authorino instance:
 
 ```sh
-kubectl -n authorino port-forward deployment/envoy 8000:8000 &
-```
-
-### Apply the `AuthConfig`
-```sh
-kubectl -n authorino apply -f -<<EOF
-apiVersion: authorino.kuadrant.io/v1beta1
-kind: AuthConfig
+kubectl -n kas-fleet-manager-authorino apply -f -<<EOF
+apiVersion: operator.authorino.kuadrant.io/v1beta1
+kind: Authorino
 metadata:
-  name: kas-fleet-manager-protection
+  name: authorino
 spec:
-  hosts:
-  - api.openshift.com
-  - api.stage.openshift.com
-  - kas-fleet-manager.127.0.0.1.nip.io # local demo
-  identity:
-  - name: redhat-external
-    oidc:
-      endpoint: https://sso.redhat.com/auth/realms/redhat-external
-  metadata:
-  - name: ams-current-account
-    http:
-      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/current_account
-      method: GET
-      headers:
-        - name: Authorization
-          valueFrom:
-            authJSON: context.request.http.headers.authorization
-  - name: quota-cost
-    http:
-      endpoint: https://api.openshift.com/api/accounts_mgmt/v1/organizations/{auth.metadata.ams-current-account.organization.id}/quota_cost?fetchRelatedResources=true&search=allowed%20%3E%200&forceRecalc=true
-      method: GET
-      headers:
-        - name: Authorization
-          valueFrom:
-            authJSON: context.request.http.headers.authorization
-    priority: 1
-  authorization:
-  - name: quota-check
-    opa:
-      inlineRego: |
-        import input.context.request.http as req
-
-        create_kafka_instance {
-          req.method == "POST"
-          req.path == "/api/kafkas_mgmt/v1/kafkas"
-        }
-
-        quota = object.get(input.auth.metadata, "quota-cost", {})
-
-        quota_type_std__billing_model_std {
-          quota.items[i].related_resources[j].resource_name == "rhosak"
-          quota.items[i].related_resources[j].product == "RHOSAK"
-          quota.items[i].related_resources[j].billing_model == "standard"
-          quota.items[i].allowed - quota.items[i].consumed > 0
-        }
-
-        quota_type_std__billing_model_marketplace {
-          quota.items[i].related_resources[j].resource_name == "rhosak"
-          quota.items[i].related_resources[j].product == "RHOSAK"
-          quota.items[i].related_resources[j].billing_model == "marketplace"
-          quota.items[i].allowed - quota.items[i].consumed > 0
-        }
-
-        allow { not create_kafka_instance }
-        allow { create_kafka_instance; quota_type_std__billing_model_std }
-        allow { create_kafka_instance; quota_type_std__billing_model_marketplace }
+  image: quay.io/kuadrant/authorino:latest # Using 'latest' because it contains the fix to https://github.com/Kuadrant/authorino/issues/356
+  authConfigLabelSelectors: authorino.kuadrant.io/tenant=kas-fleet-manager
+  secretLabelSelectors: authorino.kuadrant.io/secret in (api-key, x509),authorino.kuadrant.io/tenant=kas-fleet-manager
+  listener:
+    tls:
+      certSecretRef:
+        name: authorino-authorino-authorization-tls
+  oidcServer:
+    tls:
+      certSecretRef:
+        name: authorino-authorino-oidc-tls
 EOF
 ```
 
-## 2. Consume Kafka Service Fleet Manager
+### 4. Enable external authorization
 
-### Get an offline token
-You can request an offline token at https://console.redhat.com/openshift/token.
+#### Apply the AuthConfigs
 
-Check your existing offline tokens at https://sso.redhat.com/auth/realms/redhat-external/account/applications (though you will not be able to see the secret value of the token there).
-
-### Login with OCM
 ```sh
-~/.oc/bin/ocm login --token="<offline-token>"
+curl -sL https://raw.githubusercontent.com/guicassolato/kas-fleet-manager-authorino/main/kas-fleet-manager-authconfig.yaml | envsubst | kubectl -n kas-fleet-manager-authorino apply -f -
+kubectl -n kas-fleet-manager-authorino apply -f https://raw.githubusercontent.com/guicassolato/kas-fleet-manager-authorino/main/kas-fleet-manager-pip-authconfig.yaml
 ```
 
-### Send requests
+#### Patch the Envoy configuration
+
+Patch the Envoy config with the ext-authz filter:
+
 ```sh
-curl -H "Authorization: Bearer $(~/.oc/bin/ocm token)" -X POST http://kas-fleet-manager.127.0.0.1.nip.io:8000/api/kafkas_mgmt/v1/kafkas
+kubectl -n kas-fleet-manager-authorino get configmap/kas-fleet-manager-envoy-config -o jsonpath='{.data.main\.yaml}' > /tmp/envoy-config.yaml
+yq -i '
+  .static_resources.clusters += {"name":"authorino","connect_timeout":"0.25s","type":"strict_dns","lb_policy":"round_robin","http2_protocol_options":{},"load_assignment":{"cluster_name":"authorino","endpoints":[{"lb_endpoints":[{"endpoint":{"address":{"socket_address":{"address":"authorino-authorino-authorization.kas-fleet-manager-authorino.svc","port_value":50051}}}}]}]},"transport_socket":{"name":"envoy.transport_sockets.tls","typed_config":{"@type":"type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext","common_tls_context":{"validation_context":{"trusted_ca":{"filename":"/etc/ssl/certs/authorino-ca-cert.crt"}}}}}} |
+  .static_resources.listeners[1].filter_chains[0].filters[0].typed_config.http_filters = [{"name":"envoy.filters.http.ext_authz","typed_config":{"@type":"type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz","transport_api_version":"V3","failure_mode_allow":false,"grpc_service":{"envoy_grpc":{"cluster_name":"authorino"},"timeout":"1s"}}}] + .static_resources.listeners[1].filter_chains[0].filters[0].typed_config.http_filters
+' /tmp/envoy-config.yaml
+sed -e 's/\x1B\[[0-9;]*[JKmsu]//g' -i /tmp/envoy-config.yaml
+
+kubectl -n kas-fleet-manager-authorino delete configmap kas-fleet-manager-envoy-config
+kubectl -n kas-fleet-manager-authorino create configmap kas-fleet-manager-envoy-config --from-file=main.yaml=/tmp/envoy-config.yaml
 ```
 
-## 3. Cleanup
+Mount Authorino's TLS certs into the Envoy deployment:
+
 ```sh
-kind delete cluster --name kas-fleet-manager-demo
+kubectl -n kas-fleet-manager-authorino patch deployment/kas-fleet-manager --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"authorino-ca-cert","secret":{"defaultMode":420,"secretName":"authorino-authorino-authorization-tls"}}},
+  {"op":"add","path":"/spec/template/spec/containers/1/volumeMounts/-","value":{"mountPath":"/etc/ssl/certs/authorino-ca-cert.crt","name":"authorino-ca-cert","readOnly":true,"subPath":"tls.crt"}}]'
+```
+
+The command above will restart the Kafka Fleet Manager service.
+
+### 5. Send requests to the Kafka Fleet Manager service
+
+List Kafka clusters:
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/kafkas
+```
+
+Create a Kafka cluster:
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"my-kafka","cloud_provider":"aws","region":"us-east-1","multi_az":false}' \
+     "https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/kafkas?async=true"
+```
+
+List supported cloud providers:
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/cloud_providers
+```
+
+List supported cloud provider regions (AWS):
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/cloud_providers/aws/regions
+```
+
+List supported instance types (AWS us-east-1):
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/instance_types/aws/us-east-1
+```
+
+List Service Accounts:
+
+```sh
+curl -H "Authorization: Bearer $(ocm token)" \
+     https://kas-fleet-manager-kas-fleet-manager-authorino.apps.$K8S_CLUSTER_DOMAIN/api/kafkas_mgmt/v1/service_accounts
+```
+
+### Cleanup
+
+Decommission the Kafka Fleet Manager service:
+
+```sh
+./uninstall.sh
+```
+
+Uninstall the Authorino Operator:
+
+```sh
+kubectl delete namespace authorino-operator
 ```
