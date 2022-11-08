@@ -174,7 +174,7 @@ spec:
           "denied-test-user1@example.com",
           "denied-test-user2@example.com",
         ]
-        denied { list[_] == input.auth.identity.username }
+        denied { list[_] == input.auth.identity.email }
         allow { not denied }
 
   - name: allow-list
