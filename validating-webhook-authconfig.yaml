@@ -1,0 +1,31 @@
+# AuthConfig used to validate control plane operations (i.e. requests to the Kubernetes API)
+# related to other AuthConfig custom resources.
+apiVersion: authorino.kuadrant.io/v1beta1
+kind: AuthConfig
+metadata:
+  name: validating-webbook
+  labels:
+    authorino.kuadrant.io/tenant: kas-fleet-manager
+spec:
+  hosts:
+  - authorino-authorino-authorization.kas-fleet-manager-authorino.svc
+
+  when:
+  - selector: context.request.http.body.@fromstr|request.object.metadata.labels.authorino\.kuadrant\.io/tenant
+    operator: eq
+    value: kas-fleet-manager
+
+  authorization:
+  - name: redhat-ipd-only
+    when:
+    - selector: context.request.http.body.@fromstr|request.object.spec.hosts
+      operator: incl
+      value: kas-fleet-manager-kas-fleet-manager-authorino.apps.${K8S_CLUSTER_DOMAIN}
+    opa:
+      inlineRego: |
+        authconfig = json.unmarshal(input.context.request.http.body).request.object
+        identity_count = count(authconfig.spec.identity)
+        allow {
+          identity_count > 0
+          count({ i | authconfig.spec.identity[i]; regex.match("^https://(sso|auth)\\.redhat\\.com/.+", authconfig.spec.identity[i].oidc.endpoint) }) == identity_count
+        }
