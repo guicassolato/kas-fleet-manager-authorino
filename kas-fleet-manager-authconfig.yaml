@@ -9,19 +9,19 @@ spec:
   hosts:
   - kas-fleet-manager-kas-fleet-manager-authorino.apps.${K8S_CLUSTER_DOMAIN}
 
+  when:
+  - selector: context.request.http.path
+    operator: matches
+    value: ^/api/kafkas_mgmt/v1/.+
+
   patterns:
-    api-route:
-    - selector: context.request.http.path
-      operator: matches
-      value: ^/api/kafkas_mgmt/.+
-    v1-route:
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":3}"
-      operator: eq
-      value: v1
-    kafkas-route:
+    acl-required:
     - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: eq
-      value: kafkas
+      operator: neq
+      value: agent-clusters
+    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
+      operator: neq
+      value: admin
     kafka-resource-route:
     - selector: context.request.http.path
       operator: matches
@@ -33,21 +33,6 @@ spec:
     - selector: context.request.http.method
       operator: eq
       value: POST
-    metrics-federate-route:
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: eq
-      value: kafkas
-    - selector: context.request.http.path
-      operator: matches
-      value: /metrics/federate$
-    service-accounts-route:
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: eq
-      value: service_accounts
-    supported-instance-types-route:
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: eq
-      value: instance_types
     agent-clusters-route:
     - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
       operator: eq
@@ -56,29 +41,6 @@ spec:
     - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
       operator: eq
       value: admin
-    acl-required:
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: neq
-      value: agent-clusters
-    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
-      operator: neq
-      value: admin
-    redhat-sso:
-    - selector: auth.identity.iss
-      operator: eq
-      value: https://sso.redhat.com/auth/realms/redhat-external
-    admin-sso:
-    - selector: auth.identity.iss
-      operator: eq
-      value: https://auth.redhat.com/auth/realms/EmployeeIDP
-    require-org-id:
-    - selector: auth.identity.org_id
-      operator: neq
-      value: ""
-
-  when:
-  - patternRef: api-route
-  - patternRef: v1-route
 
   identity:
   - name: redhat-sso
@@ -93,26 +55,24 @@ spec:
       ttl: 3600
 
   metadata:
-  - name: terms-and-conditions
+  - name: resource-info
     when:
-    - patternRef: create-kafka-route
+    - patternRef: kafka-resource-route
     http:
-      endpoint: https://api.stage.openshift.com/api/authorizations/v1/self_terms_review
-      method: POST
-      bodyParameters:
-      - name: account_username
-        valueFrom: { authJSON: auth.identity.username }
-      - name: site_code
-        value: OCM
-      - name: event_code
-        value: register
+      endpoint: "https://kas-fleet-manager-envoy.kas-fleet-manager-authorino.svc:9001/api/kafkas_mgmt/v1/authz-metadata/kafkas/{context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":5}}"
       contentType: application/json
+      sharedSecretRef:
+        name: authorino-metadata-client
+        key: api_key
+      credentials:
+        in: custom_header
+        keySelector: x-api-key
       headers:
-      - name: Authorization
-        valueFrom: { authJSON: context.request.http.headers.authorization }
+      - name: x-authz-request-id
+        valueFrom: { authJSON: context.request.http.id }
     cache:
       key:
-        valueFrom: { authJSON: auth.identity.username }
+        valueFrom: { authJSON: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":5}" }
       ttl: 300
 
   - name: cluster-info
@@ -135,48 +95,30 @@ spec:
         valueFrom: { authJSON: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":5}" }
       ttl: 300
 
-  - name: resource-info
+  - name: terms-and-conditions
     when:
-    - patternRef: kafka-resource-route
+    - patternRef: create-kafka-route
     http:
-      endpoint: "https://kas-fleet-manager-envoy.kas-fleet-manager-authorino.svc:9001/api/kafkas_mgmt/v1/authz-metadata/kafkas/{context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":5}}"
+      endpoint: https://api.stage.openshift.com/api/authorizations/v1/self_terms_review
+      method: POST
+      bodyParameters:
+      - name: account_username
+        valueFrom: { authJSON: auth.identity.username }
+      - name: site_code
+        value: OCM
+      - name: event_code
+        value: register
       contentType: application/json
-      sharedSecretRef:
-        name: authorino-metadata-client
-        key: api_key
-      credentials:
-        in: custom_header
-        keySelector: x-api-key
       headers:
-      - name: x-authz-request-id
-        valueFrom: { authJSON: context.request.http.id }
+      - name: Authorization
+        valueFrom: { authJSON: context.request.http.headers.authorization }
     cache:
       key:
-        valueFrom: { authJSON: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":5}" }
+        valueFrom: { authJSON: auth.identity.username }
       ttl: 300
 
   authorization:
-  # Token type
-  - name: bearer-token
-    json:
-      rules:
-      - selector: auth.identity.typ
-        operator: eq
-        value: Bearer
-
-  # Access Control List
-  - name: deny-list
-    when:
-    - patternRef: acl-required
-    opa:
-      inlineRego: |
-        list := [
-          "denied-test-user1@example.com",
-          "denied-test-user2@example.com",
-        ]
-        denied { list[_] == input.auth.identity.email }
-        allow { not denied }
-
+  # Access Control Lists
   - name: allow-list
     when:
     - patternRef: acl-required
@@ -191,7 +133,68 @@ spec:
         ]
         allow { list[_] == input.auth.identity.org_id }
 
-  # Terms & Conditions (T&C)
+  - name: deny-list
+    when:
+    - patternRef: acl-required
+    opa:
+      inlineRego: |
+        list := [
+          "denied-test-user1@example.com",
+          "denied-test-user2@example.com",
+        ]
+        denied { list[_] == input.auth.identity.email }
+        allow { not denied }
+
+  # JWT claim: typ
+  - name: bearer-token
+    json:
+      rules:
+      - selector: auth.identity.typ
+        operator: eq
+        value: Bearer
+
+  # JWT claim: iss
+  - name: redhat-sso
+    when:
+    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
+      operator: neq
+      value: admin
+    json:
+      rules:
+      - selector: auth.identity.iss
+        operator: eq
+        value: https://sso.redhat.com/auth/realms/redhat-external
+
+  - name: admin-sso
+    when:
+    - patternRef: admin-route
+    json:
+      rules:
+      - selector: auth.identity.iss
+        operator: eq
+        value: https://auth.redhat.com/auth/realms/EmployeeIDP
+
+  # JWT claim: org_id
+  - name: require-org-id
+    when:
+    - selector: "context.request.http.path.@extract:{\"sep\":\"/\",\"pos\":4}"
+      operator: matches
+      value: ^(kafkas|service_accounts|instance_types)$
+    json:
+      rules:
+      - selector: auth.identity.org_id
+        operator: neq
+        value: ""
+
+  # JWT claim: clientId
+  - name: cluster-id
+    when:
+    - patternRef: agent-clusters-route
+    opa:
+      inlineRego: |
+        allow { input.auth.identity.clientId == object.get(input.auth.metadata, "cluster-info", {}).client_id }
+
+  # Terms & Conditions
   - name: terms-and-conditions
     when:
     - patternRef: create-kafka-route
@@ -200,60 +203,6 @@ spec:
       - selector: auth.metadata.terms-and-conditions.terms_required
         operator: eq
         value: "false"
-
-  # JWT claims: iss, org_id, clientId
-  - name: kafkas
-    when:
-    - patternRef: kafkas-route
-    json:
-      rules:
-      - patternRef: redhat-sso
-      - patternRef: require-org-id
-
-  - name: metrics-federate
-    when:
-    - patternRef: metrics-federate-route
-    json:
-      rules:
-      - patternRef: redhat-sso
-      - patternRef: require-org-id
-
-  - name: service-accounts
-    when:
-    - patternRef: service-accounts-route
-    json:
-      rules:
-      - patternRef: redhat-sso
-      - patternRef: require-org-id
-
-  - name: supported-instance-types
-    when:
-    - patternRef: supported-instance-types-route
-    json:
-      rules:
-      - patternRef: redhat-sso
-      - patternRef: require-org-id
-
-  - name: agent-clusters
-    when:
-    - patternRef: agent-clusters-route
-    json:
-      rules:
-      - patternRef: redhat-sso
-
-  - name: cluster-id
-    when:
-    - patternRef: agent-clusters-route
-    opa:
-      inlineRego: |
-        allow { input.auth.identity.clientId == object.get(input.auth.metadata, "cluster-info", {}).client_id }
-
-  - name: admin
-    when:
-    - patternRef: admin-route
-    json:
-      rules:
-      - patternRef: admin-sso
 
   # Resource Owner
   - name: owner
@@ -281,7 +230,7 @@ spec:
         allow { method == "DELETE"; has_permission }
         allow { method == "PATCH";  has_permission; new_owner_ok }
 
-  # RBAC
+  # Admin RBAC
   - name: admin-rbac
     when:
     - patternRef: admin-route
@@ -296,6 +245,7 @@ spec:
         allow { method == "PATCH";  roles[_] == "kas-fleet-manager-admin-write" }
         allow { method == "DELETE"; roles[_] == "kas-fleet-manager-admin-full" }
 
+  # Lock down authz-metadata endpoints
   - name: internal-endpoints
     json:
       rules:
@@ -303,6 +253,7 @@ spec:
         operator: neq
         value: authz-metadata
 
+  # Custom 403 denial as JSON when unauthorized
   denyWith:
     unauthorized:
       headers:
